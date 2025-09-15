@@ -1,5 +1,3 @@
-package com.xulihang;
-
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
@@ -17,7 +15,7 @@ import java.util.Map;
 
 import static com.xulihang.LamaInference.prepareImgAndMask;
 
-public class Main {
+public class Test {
     public static void main(String[] args) throws OrtException {
         System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
         System.out.println("Hello world!");
