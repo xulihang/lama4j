@@ -8,6 +8,7 @@ import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
 
+import java.awt.*;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -16,13 +17,67 @@ import java.nio.FloatBuffer;
 import java.util.*;
 
 public class LamaInference {
+    OrtSession session;
+    OrtEnvironment env = OrtEnvironment.getEnvironment();
+    public LamaInference(String path) throws OrtException {
+        OrtSession.SessionOptions options = new OrtSession.SessionOptions();
+        session = env.createSession(path, options);
+    }
 
-    static {
-        System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+    public Mat inpaint(Mat image, Mat mask) throws OrtException {
+
+        // 调整大小到 512x512
+        Imgproc.resize(image, image, new Size(512, 512));
+        Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
+
+        Map<String, OnnxTensor> inputs = prepareImgAndMask(image, mask, 8);
+
+        // 推理
+        OrtSession.Result results = session.run(inputs);
+        float[][][][] output = (float[][][][]) results.get(0).getValue();
+
+        // 转换输出 (NCHW -> HWC)
+        int outC = output[0].length;
+        int outH = output[0][0].length;
+        int outW = output[0][0][0].length;
+
+        Mat outImg = new Mat(outH, outW, CvType.CV_8UC3);
+        byte[] outData = new byte[outH * outW * outC];
+
+        float minVal = Float.MAX_VALUE;
+        float maxVal = -Float.MAX_VALUE;
+
+        // 先找最小最大值
+        for (int c = 0; c < outC; c++) {
+            for (int y = 0; y < outH; y++) {
+                for (int x = 0; x < outW; x++) {
+                    float v = output[0][c][y][x];
+                    if (v < minVal) minVal = v;
+                    if (v > maxVal) maxVal = v;
+                }
+            }
+        }
+
+        int idx = 0;
+        for (int y = 0; y < outH; y++) {
+            for (int x = 0; x < outW; x++) {
+                for (int c = 0; c < outC; c++) {
+                    float v = output[0][c][y][x];
+                    // 归一化到 0–255
+                    int iv = (int) ((v - minVal) / (maxVal - minVal) * 255.0f);
+                    iv = Math.max(0, Math.min(255, iv));
+                    outData[idx++] = (byte) iv;
+                }
+            }
+        }
+
+        outImg.put(0, 0, outData);
+        Imgproc.cvtColor(outImg, outImg, Imgproc.COLOR_BGR2RGB);
+        return outImg;
     }
 
     // 将 Mat 转换为 NCHW 格式 float[]
-    public static float[] getImage(Mat img, boolean isMask) {
+    private float[] getImage(Mat img, boolean isMask) {
         Mat converted = new Mat();
         if (!isMask && img.channels() == 3) {
             Imgproc.cvtColor(img, converted, Imgproc.COLOR_BGR2RGB);
@@ -51,9 +106,7 @@ public class LamaInference {
         return chw;
     }
 
-    public static Map<String, OnnxTensor> prepareImgAndMask(Mat image, Mat mask,
-                                                            OrtEnvironment env, OrtSession session,
-                                                            int padOutToModulo) throws OrtException {
+    private Map<String, OnnxTensor> prepareImgAndMask(Mat image, Mat mask, int padOutToModulo) throws OrtException {
         image = padImgToModulo(image, padOutToModulo);
         mask = padImgToModulo(mask, padOutToModulo);
 
@@ -79,19 +132,19 @@ public class LamaInference {
         return inputs;
     }
 
-    public static int ceilModulo(int x, int mod) {
+    private int ceilModulo(int x, int mod) {
         return (x % mod == 0) ? x : ((x / mod + 1) * mod);
     }
 
     // 缩放图像
-    public static Mat scaleImage(Mat img, double factor, int interpolation) {
+    private Mat scaleImage(Mat img, double factor, int interpolation) {
         Mat dst = new Mat();
         Imgproc.resize(img, dst, new Size(img.cols() * factor, img.rows() * factor), 0, 0, interpolation);
         return dst;
     }
 
     // 填充到指定倍数
-    public static Mat padImgToModulo(Mat img, int mod) {
+    private Mat padImgToModulo(Mat img, int mod) {
         int h = img.rows();
         int w = img.cols();
         int outH = ceilModulo(h, mod);
