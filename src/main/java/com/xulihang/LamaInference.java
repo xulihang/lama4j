@@ -101,5 +101,4 @@ public class LamaInference {
         Core.copyMakeBorder(img, dst, 0, outH - h, 0, outW - w, Core.BORDER_REFLECT);
         return dst;
     }
-
 }

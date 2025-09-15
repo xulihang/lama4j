@@ -78,6 +78,7 @@ public class Main {
         }
 
         outImg.put(0, 0, outData);
+        Imgproc.cvtColor(outImg, outImg, Imgproc.COLOR_BGR2RGB);
         Imgcodecs.imwrite("out.jpg", outImg);
         System.out.println("Saved: out.jpg (range " + minVal + " ~ " + maxVal + ")");
     }
