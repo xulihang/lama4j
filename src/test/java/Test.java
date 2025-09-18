@@ -26,9 +26,11 @@ public class Test {
         // 读取图像和 mask
         Mat image = Imgcodecs.imread("image.jpg");
         Mat mask = Imgcodecs.imread("mask.png", Imgcodecs.IMREAD_GRAYSCALE);
-        Mat outImg = lama.inpaint(image,mask);
-        Imgcodecs.imwrite("out.jpg", outImg);
-
+        for (int i = 0; i < 50; i++) {
+            Mat outImg = lama.inpaint(image,mask);
+            Imgcodecs.imwrite("out.jpg", outImg);
+            System.out.println("Saved: out.jpg");
+        }
         Mat outImg2 = lama.inpaint(image,mask);
         Imgcodecs.imwrite("out2.jpg", outImg2);
         System.out.println("Saved: out.jpg");

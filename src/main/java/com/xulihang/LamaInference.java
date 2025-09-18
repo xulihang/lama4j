@@ -1,42 +1,32 @@
 package com.xulihang;
 
-import ai.onnxruntime.OnnxTensor;
-import ai.onnxruntime.OrtEnvironment;
-import ai.onnxruntime.OrtException;
-import ai.onnxruntime.OrtSession;
+import ai.onnxruntime.*;
 import org.opencv.core.*;
-import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
 
-import java.awt.*;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.FloatBuffer;
 import java.util.*;
 
 public class LamaInference {
-    OrtSession session;
-    OrtEnvironment env = OrtEnvironment.getEnvironment();
+    private final OrtEnvironment env = OrtEnvironment.getEnvironment();
+    private final OrtSession session;
+
     public LamaInference(String path) throws OrtException {
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         session = env.createSession(path, options);
     }
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
-
-        // 调整大小到 512x512
         Imgproc.resize(image, image, new Size(512, 512));
         Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
 
-        Map<String, OnnxTensor> inputs = prepareImgAndMask(image, mask, 8);
+        try (OrtSession.Result results = session.run(prepareImgAndMask(image, mask, 8))) {
+            float[][][][] output = (float[][][][]) results.get(0).getValue();
+            return convertOutputToMat(output);
+        }
+    }
 
-        // 推理
-        OrtSession.Result results = session.run(inputs);
-        float[][][][] output = (float[][][][]) results.get(0).getValue();
-
-        // 转换输出 (NCHW -> HWC)
+    private Mat convertOutputToMat(float[][][][] output) {
         int outC = output[0].length;
         int outH = output[0][0].length;
         int outW = output[0][0][0].length;
@@ -44,16 +34,13 @@ public class LamaInference {
         Mat outImg = new Mat(outH, outW, CvType.CV_8UC3);
         byte[] outData = new byte[outH * outW * outC];
 
-        float minVal = Float.MAX_VALUE;
-        float maxVal = -Float.MAX_VALUE;
-
-        // 先找最小最大值
+        float minVal = Float.MAX_VALUE, maxVal = -Float.MAX_VALUE;
         for (int c = 0; c < outC; c++) {
             for (int y = 0; y < outH; y++) {
                 for (int x = 0; x < outW; x++) {
                     float v = output[0][c][y][x];
-                    if (v < minVal) minVal = v;
-                    if (v > maxVal) maxVal = v;
+                    minVal = Math.min(minVal, v);
+                    maxVal = Math.max(maxVal, v);
                 }
             }
         }
@@ -63,20 +50,36 @@ public class LamaInference {
             for (int x = 0; x < outW; x++) {
                 for (int c = 0; c < outC; c++) {
                     float v = output[0][c][y][x];
-                    // 归一化到 0–255
                     int iv = (int) ((v - minVal) / (maxVal - minVal) * 255.0f);
                     iv = Math.max(0, Math.min(255, iv));
                     outData[idx++] = (byte) iv;
                 }
             }
         }
-
         outImg.put(0, 0, outData);
         Imgproc.cvtColor(outImg, outImg, Imgproc.COLOR_BGR2RGB);
         return outImg;
     }
 
-    // 将 Mat 转换为 NCHW 格式 float[]
+    private Map<String, OnnxTensor> prepareImgAndMask(Mat image, Mat mask, int padOutToModulo) throws OrtException {
+        image = padImgToModulo(image, padOutToModulo);
+        mask = padImgToModulo(mask, padOutToModulo);
+
+        int h = image.rows(), w = image.cols();
+
+        float[] imgCHW = getImage(image, false);
+        OnnxTensor imgTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(imgCHW), new long[]{1, 3, h, w});
+
+        float[] maskCHW = getImage(mask, true);
+        for (int i = 0; i < maskCHW.length; i++) maskCHW[i] = maskCHW[i] > 0 ? 1.0f : 0.0f;
+        OnnxTensor maskTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(maskCHW), new long[]{1, 1, h, w});
+
+        Map<String, OnnxTensor> inputs = new HashMap<>();
+        inputs.put("image", imgTensor);
+        inputs.put("mask", maskTensor);
+        return inputs;
+    }
+
     private float[] getImage(Mat img, boolean isMask) {
         Mat converted = new Mat();
         if (!isMask && img.channels() == 3) {
@@ -85,10 +88,7 @@ public class LamaInference {
             converted = img.clone();
         }
 
-        int h = converted.rows();
-        int w = converted.cols();
-        int c = converted.channels();
-
+        int h = converted.rows(), w = converted.cols(), c = converted.channels();
         float[] chw = new float[c * h * w];
         byte[] data = new byte[(int) (converted.total() * converted.channels())];
         converted.get(0, 0, data);
@@ -106,50 +106,13 @@ public class LamaInference {
         return chw;
     }
 
-    private Map<String, OnnxTensor> prepareImgAndMask(Mat image, Mat mask, int padOutToModulo) throws OrtException {
-        image = padImgToModulo(image, padOutToModulo);
-        mask = padImgToModulo(mask, padOutToModulo);
-
-        int h = image.rows();
-        int w = image.cols();
-
-        // image: 3 通道
-        float[] imgCHW = getImage(image, false);
-        long[] imgShape = new long[]{1, 3, h, w};
-        OnnxTensor imgTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(imgCHW), imgShape);
-
-        // mask: 1 通道
-        float[] maskCHW = getImage(mask, true);
-        for (int i = 0; i < maskCHW.length; i++) {
-            maskCHW[i] = maskCHW[i] > 0 ? 1.0f : 0.0f;
-        }
-        long[] maskShape = new long[]{1, 1, h, w};
-        OnnxTensor maskTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(maskCHW), maskShape);
-
-        Map<String, OnnxTensor> inputs = new HashMap<>();
-        inputs.put("image", imgTensor);
-        inputs.put("mask", maskTensor);
-        return inputs;
-    }
-
     private int ceilModulo(int x, int mod) {
         return (x % mod == 0) ? x : ((x / mod + 1) * mod);
     }
 
-    // 缩放图像
-    private Mat scaleImage(Mat img, double factor, int interpolation) {
-        Mat dst = new Mat();
-        Imgproc.resize(img, dst, new Size(img.cols() * factor, img.rows() * factor), 0, 0, interpolation);
-        return dst;
-    }
-
-    // 填充到指定倍数
     private Mat padImgToModulo(Mat img, int mod) {
-        int h = img.rows();
-        int w = img.cols();
-        int outH = ceilModulo(h, mod);
-        int outW = ceilModulo(w, mod);
-
+        int h = img.rows(), w = img.cols();
+        int outH = ceilModulo(h, mod), outW = ceilModulo(w, mod);
         Mat dst = new Mat();
         Core.copyMakeBorder(img, dst, 0, outH - h, 0, outW - w, Core.BORDER_REFLECT);
         return dst;
