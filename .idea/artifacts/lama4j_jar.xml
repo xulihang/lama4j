@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="lama4j:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/lama4j_jar</output-path>
+    <root id="archive" name="lama4j.jar">
+      <element id="module-output" name="lama4j" />
+    </root>
+  </artifact>
+</component>
