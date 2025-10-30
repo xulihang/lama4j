@@ -17,8 +17,8 @@ public class LamaInference {
     }
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
-        Imgproc.resize(image, image, new Size(512, 512));
-        Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
+        //Imgproc.resize(image, image, new Size(960, 960));
+        //Imgproc.resize(mask, mask, new Size(960, 960), 0, 0, Imgproc.INTER_NEAREST);
 
         try (OrtSession.Result results = session.run(prepareImgAndMask(image, mask, 8))) {
             float[][][][] output = (float[][][][]) results.get(0).getValue();

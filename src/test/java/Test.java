@@ -22,24 +22,22 @@ public class Test {
         System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
         System.out.println("Hello world!");
         System.out.println("Test");
-        Test2();
+        Test();
     }
 
     private static void Test() throws OrtException{
         // 加载 ONNX 模型
-        LamaInference lama = new LamaInference("lama_fp32.onnx");
+        LamaInference lama = new LamaInference("model.onnx");
 
 
         // 读取图像和 mask
-        Mat image = Imgcodecs.imread("image.jpg");
-        Mat mask = Imgcodecs.imread("mask.png", Imgcodecs.IMREAD_GRAYSCALE);
-        for (int i = 0; i < 50; i++) {
-            Mat outImg = lama.inpaint(image,mask);
-            Imgcodecs.imwrite("out.jpg", outImg);
-            System.out.println("Saved: out.jpg");
-        }
-        Mat outImg2 = lama.inpaint(image,mask);
-        Imgcodecs.imwrite("out2.jpg", outImg2);
+        Mat image = Imgcodecs.imread("(8).png");
+        Mat mask = Imgcodecs.imread("thresh.jpg", Imgcodecs.IMREAD_GRAYSCALE);
+
+        Mat outImg = lama.inpaint(image,mask);
+        Imgcodecs.imwrite("out.jpg", outImg);
+        System.out.println("Saved: out.jpg");
+
         System.out.println("Saved: out.jpg");
     }
 
