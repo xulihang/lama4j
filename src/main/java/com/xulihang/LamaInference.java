@@ -4,6 +4,7 @@ import ai.onnxruntime.*;
 import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
 
+import java.lang.reflect.Method;
 import java.nio.FloatBuffer;
 import java.util.*;
 
@@ -20,14 +21,19 @@ public class LamaInference {
                 System.out.println(" - " + provider.getName());
                 if (provider.getName().toLowerCase().contains("dml")) {
                     // 使用DirectML提供者
-                    options.addDirectML(0); // 设备ID 0
-                    System.out.println("✓ DirectML provider enabled");
+                    try {
+                        options.addDirectML(0);
+                        System.out.println("✓ DirectML enabled via standard API");
+                    } catch (Exception e) {
+                        System.out.println("Standard DirectML API failed: " + e.getMessage());
+                    }
                     break;
                 }
             }
         }
         session = env.createSession(path, options);
     }
+
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
         //Imgproc.resize(image, image, new Size(960, 960));
