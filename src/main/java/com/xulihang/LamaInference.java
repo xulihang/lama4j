@@ -10,9 +10,22 @@ import java.util.*;
 public class LamaInference {
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
     private final OrtSession session;
-
+    public boolean tryDirectML = false;
     public LamaInference(String path) throws OrtException {
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
+        if (tryDirectML) {
+            EnumSet<OrtProvider> providers = OrtEnvironment.getEnvironment().getAvailableProviders();
+            System.out.println("Available ONNX Runtime providers:");
+            for (OrtProvider provider : providers) {
+                System.out.println(" - " + provider.getName());
+                if (provider.getName().toLowerCase().contains("dml")) {
+                    // 使用DirectML提供者
+                    options.addDirectML(0); // 设备ID 0
+                    System.out.println("✓ DirectML provider enabled");
+                    break;
+                }
+            }
+        }
         session = env.createSession(path, options);
     }
 
