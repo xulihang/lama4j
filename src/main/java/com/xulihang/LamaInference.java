@@ -10,7 +10,7 @@ import java.util.*;
 public class LamaInference {
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
     private final OrtSession session;
-    public boolean tryDirectML = false;
+    public static boolean tryDirectML = false;
     public LamaInference(String path) throws OrtException {
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         if (tryDirectML) {
