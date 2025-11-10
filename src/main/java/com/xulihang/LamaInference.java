@@ -12,6 +12,11 @@ public class LamaInference {
     private final OrtSession session;
 
     public LamaInference(String path) throws OrtException {
+        EnumSet<OrtProvider> providers = OrtEnvironment.getEnvironment().getAvailableProviders();
+        System.out.println("Available ONNX Runtime providers:");
+        for (OrtProvider provider : providers) {
+            System.out.println(" - " + provider.getName());
+        }
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         session = env.createSession(path, options);
     }
