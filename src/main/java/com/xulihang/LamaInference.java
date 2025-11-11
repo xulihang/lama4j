@@ -13,11 +13,28 @@ public class LamaInference {
 
     public LamaInference(String path) throws OrtException {
         EnumSet<OrtProvider> providers = OrtEnvironment.getEnvironment().getAvailableProviders();
+        OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         System.out.println("Available ONNX Runtime providers:");
         for (OrtProvider provider : providers) {
-            System.out.println(" - " + provider.getName());
+            String name = provider.getName();
+            System.out.println(" - " + name);
+            if (name.toLowerCase().startsWith("coreml")){
+                try {
+                    options.addCoreML();
+                }catch(Exception e){
+                    e.printStackTrace();
+                }
+                break;
+            }
+            if (name.toLowerCase().startsWith("cuda")) {
+                try {
+                    options.addCUDA();
+                }catch(Exception e){
+                    e.printStackTrace();
+                }
+                break;
+            }
         }
-        OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         session = env.createSession(path, options);
     }
 
