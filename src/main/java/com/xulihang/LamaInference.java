@@ -22,8 +22,8 @@ public class LamaInference {
     }
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
-        //Imgproc.resize(image, image, new Size(960, 960));
-        //Imgproc.resize(mask, mask, new Size(960, 960), 0, 0, Imgproc.INTER_NEAREST);
+        //Imgproc.resize(image, image, new Size(512, 512));
+        //Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
 
         try (OrtSession.Result results = session.run(prepareImgAndMask(image, mask, 8))) {
             float[][][][] output = (float[][][][]) results.get(0).getValue();
@@ -39,23 +39,14 @@ public class LamaInference {
         Mat outImg = new Mat(outH, outW, CvType.CV_8UC3);
         byte[] outData = new byte[outH * outW * outC];
 
-        float minVal = Float.MAX_VALUE, maxVal = -Float.MAX_VALUE;
-        for (int c = 0; c < outC; c++) {
-            for (int y = 0; y < outH; y++) {
-                for (int x = 0; x < outW; x++) {
-                    float v = output[0][c][y][x];
-                    minVal = Math.min(minVal, v);
-                    maxVal = Math.max(maxVal, v);
-                }
-            }
-        }
-
+        // 假设模型输出在 [0, 1] 范围内，直接乘以255
         int idx = 0;
         for (int y = 0; y < outH; y++) {
             for (int x = 0; x < outW; x++) {
                 for (int c = 0; c < outC; c++) {
                     float v = output[0][c][y][x];
-                    int iv = (int) ((v - minVal) / (maxVal - minVal) * 255.0f);
+                    // 直接使用固定范围，避免动态归一化
+                    int iv = (int) (v * 255.0f);
                     iv = Math.max(0, Math.min(255, iv));
                     outData[idx++] = (byte) iv;
                 }
