@@ -30,34 +30,43 @@ public class LamaInference {
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
         // 保存原始图像和 mask（resize 会覆盖输入）
         int origH = image.rows(), origW = image.cols();
-        Mat origImage = image.clone();
-        Mat origMask = mask.clone();
-
-        // 和 JS 代码一样，先 resize 到 512x512
-        Imgproc.resize(image, image, new Size(512, 512));
-        Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
-
-        Mat output;
 
         if (isMergedInput) {
+            // 4 通道合并输入：需要 image*(1-mask) 预处理 + blend 后处理
+            Mat origImage = image.clone();
+            Mat origMask = mask.clone();
+
+            Imgproc.resize(image, image, new Size(512, 512));
+            Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
+
             Map<String, OnnxTensor> inputs = prepareMergedInput(image, mask, 64);
+            Mat output;
             try (OrtSession.Result results = session.run(inputs)) {
                 output = convertOutputToMat((float[][][][]) results.get(0).getValue());
             }
+
+            Mat cropped = new Mat(output, new Rect(0, 0, 512, 512));
+            Mat resized = new Mat();
+            Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
+
+            return blendWithOriginal(origImage, origMask, resized);
         } else {
+            // 分开输入 (big-lama)：直接传给模型，模型内部处理 mask
+            Imgproc.resize(image, image, new Size(512, 512));
+            Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
+
             Map<String, OnnxTensor> inputs = prepareImgAndMask(image, mask, 64);
+            Mat output;
             try (OrtSession.Result results = session.run(inputs)) {
                 output = convertOutputToMat((float[][][][]) results.get(0).getValue());
             }
+
+            Mat cropped = new Mat(output, new Rect(0, 0, 512, 512));
+            Mat resized = new Mat();
+            Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
+
+            return resized;
         }
-
-        // 裁切回 512x512（去掉 pad），再 resize 回原始尺寸
-        Mat cropped = new Mat(output, new Rect(0, 0, 512, 512));
-        Mat resized = new Mat();
-        Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
-
-        // 只在 mask 区域使用模型输出，其余保留原图
-        return blendWithOriginal(origImage, origMask, resized);
     }
 
     /**
