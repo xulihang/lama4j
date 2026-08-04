@@ -196,6 +196,7 @@ public class LamaInference {
             }
         }
         outImg.put(0, 0, outData);
+        Imgproc.cvtColor(outImg, outImg, Imgproc.COLOR_BGR2RGB);
         return outImg;
     }
 
