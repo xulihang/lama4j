@@ -27,7 +27,7 @@ public class Test {
 
     private static void Test() throws OrtException{
         // 加载 ONNX 模型
-        LamaInference lama = new LamaInference("lama_int8.onnx");
+        LamaInference lama = new LamaInference("lama_512_fp16.onnx");
 
 
         // 读取图像和 mask

@@ -28,27 +28,69 @@ public class LamaInference {
     }
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
-        //Imgproc.resize(image, image, new Size(512, 512));
-        //Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
-
+        // 保存原始图像和 mask（resize 会覆盖输入）
         int origH = image.rows(), origW = image.cols();
+        Mat origImage = image.clone();
+        Mat origMask = mask.clone();
 
-        Map<String, OnnxTensor> inputs;
+        // 和 JS 代码一样，先 resize 到 512x512
+        Imgproc.resize(image, image, new Size(512, 512));
+        Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
+
+        Mat output;
+
         if (isMergedInput) {
-            inputs = prepareMergedInput(image, mask, 64);
+            Map<String, OnnxTensor> inputs = prepareMergedInput(image, mask, 64);
+            try (OrtSession.Result results = session.run(inputs)) {
+                output = convertOutputToMat((float[][][][]) results.get(0).getValue());
+            }
         } else {
-            inputs = prepareImgAndMask(image, mask, 64);
+            Map<String, OnnxTensor> inputs = prepareImgAndMask(image, mask, 64);
+            try (OrtSession.Result results = session.run(inputs)) {
+                output = convertOutputToMat((float[][][][]) results.get(0).getValue());
+            }
         }
 
-        try (OrtSession.Result results = session.run(inputs)) {
-            float[][][][] output = (float[][][][]) results.get(0).getValue();
-            Mat outImg = convertOutputToMat(output);
-            // 裁切回原始尺寸
-            Mat cropped = new Mat(outImg, new Rect(0, 0, origW, origH));
-            Mat result = new Mat();
-            cropped.copyTo(result);
-            return result;
+        // 裁切回 512x512（去掉 pad），再 resize 回原始尺寸
+        Mat cropped = new Mat(output, new Rect(0, 0, 512, 512));
+        Mat resized = new Mat();
+        Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
+
+        // 只在 mask 区域使用模型输出，其余保留原图
+        return blendWithOriginal(origImage, origMask, resized);
+    }
+
+    /**
+     * 只在 mask 区域用 inpainted 结果，其余区域保留原图。
+     * 对应 JS code: for each pixel, if mask>0 use model output else use original.
+     */
+    private Mat blendWithOriginal(Mat original, Mat mask, Mat inpainted) {
+        Mat result = original.clone();
+        byte[] origData = new byte[(int) (original.total() * original.channels())];
+        byte[] inpData = new byte[(int) (inpainted.total() * inpainted.channels())];
+        byte[] maskData = new byte[(int) (mask.total() * mask.channels())];
+        result.get(0, 0, origData);
+        inpainted.get(0, 0, inpData);
+        mask.get(0, 0, maskData);
+
+        int h = original.rows(), w = original.cols(), c = original.channels();
+        byte[] outData = new byte[h * w * c];
+        System.arraycopy(origData, 0, outData, 0, h * w * c);
+
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = (y * w + x);
+                int gray = maskData[idx] & 0xFF;
+                if (gray > 0) {
+                    for (int ch = 0; ch < c; ch++) {
+                        outData[idx * c + ch] = inpData[idx * c + ch];
+                    }
+                }
+            }
         }
+
+        result.put(0, 0, outData);
+        return result;
     }
 
     private Mat convertOutputToMat(float[][][][] output) {
@@ -73,7 +115,7 @@ public class LamaInference {
             }
         }
         outImg.put(0, 0, outData);
-        Imgproc.cvtColor(outImg, outImg, Imgproc.COLOR_BGR2RGB);
+        // 模型输出是 RGB，OpenCV 当 BGR 存储，不做转换即可保持正确
         return outImg;
     }
 
@@ -89,13 +131,16 @@ public class LamaInference {
         float[] maskCHW = getImage(mask, true);
         for (int i = 0; i < maskCHW.length; i++) maskCHW[i] = maskCHW[i] > 0 ? 1.0f : 0.0f;
 
-        // 合并为 4 通道: img[3,H,W] + mask[1,H,W] -> [4,H,W]
+        // 关键：image * (1 - mask)，对应 JS 代码 f[e*d+t] = s[e*d+t] * (1 - u[t])
         int pixels = h * w;
         float[] merged = new float[4 * pixels];
-        // 复制 image 3 通道
-        System.arraycopy(imgCHW, 0, merged, 0, 3 * pixels);
-        // 复制 mask 1 通道
-        System.arraycopy(maskCHW, 0, merged, 3 * pixels, pixels);
+        for (int i = 0; i < pixels; i++) {
+            float invMask = 1.0f - maskCHW[i];
+            merged[0 * pixels + i] = imgCHW[0 * pixels + i] * invMask;
+            merged[1 * pixels + i] = imgCHW[1 * pixels + i] * invMask;
+            merged[2 * pixels + i] = imgCHW[2 * pixels + i] * invMask;
+            merged[3 * pixels + i] = maskCHW[i];
+        }
 
         OnnxTensor tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(merged), new long[]{1, 4, h, w});
         Map<String, OnnxTensor> inputs = new HashMap<>();
