@@ -31,6 +31,8 @@ public class LamaInference {
         //Imgproc.resize(image, image, new Size(512, 512));
         //Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
 
+        int origH = image.rows(), origW = image.cols();
+
         Map<String, OnnxTensor> inputs;
         if (isMergedInput) {
             inputs = prepareMergedInput(image, mask, 64);
@@ -40,7 +42,12 @@ public class LamaInference {
 
         try (OrtSession.Result results = session.run(inputs)) {
             float[][][][] output = (float[][][][]) results.get(0).getValue();
-            return convertOutputToMat(output);
+            Mat outImg = convertOutputToMat(output);
+            // 裁切回原始尺寸
+            Mat cropped = new Mat(outImg, new Rect(0, 0, origW, origH));
+            Mat result = new Mat();
+            cropped.copyTo(result);
+            return result;
         }
     }
 
