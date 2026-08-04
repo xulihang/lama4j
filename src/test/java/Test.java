@@ -27,12 +27,12 @@ public class Test {
 
     private static void Test() throws OrtException{
         // 加载 ONNX 模型
-        LamaInference lama = new LamaInference("model.onnx");
+        LamaInference lama = new LamaInference("lama_int8.onnx");
 
 
         // 读取图像和 mask
-        Mat image = Imgcodecs.imread("(8).png");
-        Mat mask = Imgcodecs.imread("thresh.jpg", Imgcodecs.IMREAD_GRAYSCALE);
+        Mat image = Imgcodecs.imread("image.jpg");
+        Mat mask = Imgcodecs.imread("thresh.png", Imgcodecs.IMREAD_GRAYSCALE);
 
         Mat outImg = lama.inpaint(image,mask);
         Imgcodecs.imwrite("out.jpg", outImg);

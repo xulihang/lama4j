@@ -10,6 +10,7 @@ import java.util.*;
 public class LamaInference {
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
     private final OrtSession session;
+    private final boolean isMergedInput; // INT8 模型把 image+mask 合并为 4 通道输入
 
     public LamaInference(String path) throws OrtException {
         EnumSet<OrtProvider> providers = OrtEnvironment.getEnvironment().getAvailableProviders();
@@ -19,13 +20,25 @@ public class LamaInference {
         }
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         session = env.createSession(path, options);
+
+        // 检测模型输入格式：如果只有一个名为 "input" 的 4 通道输入，则是合并输入格式
+        Set<String> inputNames = session.getInputNames();
+        isMergedInput = inputNames.size() == 1 && inputNames.contains("input");
+        System.out.println("Model input format: " + (isMergedInput ? "merged (4ch)" : "separate (image+mask)"));
     }
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
         //Imgproc.resize(image, image, new Size(512, 512));
         //Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
 
-        try (OrtSession.Result results = session.run(prepareImgAndMask(image, mask, 8))) {
+        Map<String, OnnxTensor> inputs;
+        if (isMergedInput) {
+            inputs = prepareMergedInput(image, mask, 64);
+        } else {
+            inputs = prepareImgAndMask(image, mask, 64);
+        }
+
+        try (OrtSession.Result results = session.run(inputs)) {
             float[][][][] output = (float[][][][]) results.get(0).getValue();
             return convertOutputToMat(output);
         }
@@ -55,6 +68,32 @@ public class LamaInference {
         outImg.put(0, 0, outData);
         Imgproc.cvtColor(outImg, outImg, Imgproc.COLOR_BGR2RGB);
         return outImg;
+    }
+
+    private Map<String, OnnxTensor> prepareMergedInput(Mat image, Mat mask, int padOutToModulo) throws OrtException {
+        image = padImgToModulo(image, padOutToModulo);
+        mask = padImgToModulo(mask, padOutToModulo);
+
+        int h = image.rows(), w = image.cols();
+
+        // 将 image (BGR) 转为 RGB CHW
+        float[] imgCHW = getImage(image, false);
+        // mask 单通道 CHW
+        float[] maskCHW = getImage(mask, true);
+        for (int i = 0; i < maskCHW.length; i++) maskCHW[i] = maskCHW[i] > 0 ? 1.0f : 0.0f;
+
+        // 合并为 4 通道: img[3,H,W] + mask[1,H,W] -> [4,H,W]
+        int pixels = h * w;
+        float[] merged = new float[4 * pixels];
+        // 复制 image 3 通道
+        System.arraycopy(imgCHW, 0, merged, 0, 3 * pixels);
+        // 复制 mask 1 通道
+        System.arraycopy(maskCHW, 0, merged, 3 * pixels, pixels);
+
+        OnnxTensor tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(merged), new long[]{1, 4, h, w});
+        Map<String, OnnxTensor> inputs = new HashMap<>();
+        inputs.put("input", tensor);
+        return inputs;
     }
 
     private Map<String, OnnxTensor> prepareImgAndMask(Mat image, Mat mask, int padOutToModulo) throws OrtException {
@@ -109,8 +148,10 @@ public class LamaInference {
     private Mat padImgToModulo(Mat img, int mod) {
         int h = img.rows(), w = img.cols();
         int outH = ceilModulo(h, mod), outW = ceilModulo(w, mod);
+        // 取较大值确保 H==W，big-lama 模型内部 FFC 层要求两者一致
+        int outSize = Math.max(outH, outW);
         Mat dst = new Mat();
-        Core.copyMakeBorder(img, dst, 0, outH - h, 0, outW - w, Core.BORDER_REFLECT);
+        Core.copyMakeBorder(img, dst, 0, outSize - h, 0, outSize - w, Core.BORDER_REFLECT);
         return dst;
     }
 }
