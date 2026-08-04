@@ -11,6 +11,8 @@ public class LamaInference {
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
     private final OrtSession session;
     private final boolean isMergedInput; // INT8 模型把 image+mask 合并为 4 通道输入
+    private boolean needsResize;   // 固定 512x512 的模型需要 resize
+    private int modelH, modelW;    // 模型期望的输入尺寸
 
     public LamaInference(String path) throws OrtException {
         EnumSet<OrtProvider> providers = OrtEnvironment.getEnvironment().getAvailableProviders();
@@ -21,51 +23,99 @@ public class LamaInference {
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
         session = env.createSession(path, options);
 
-        // 检测模型输入格式：如果只有一个名为 "input" 的 4 通道输入，则是合并输入格式
+        // 检测模型输入格式
         Set<String> inputNames = session.getInputNames();
         isMergedInput = inputNames.size() == 1 && inputNames.contains("input");
         System.out.println("Model input format: " + (isMergedInput ? "merged (4ch)" : "separate (image+mask)"));
+
+        // 检测输入尺寸：通过 toString() 解析，固定正数尺寸才需要 resize
+        try {
+            Map<String, NodeInfo> inputInfo = session.getInputInfo();
+            NodeInfo info = inputInfo.get(isMergedInput ? "input" : "image");
+            String infoStr = info.toString();
+            System.out.println(infoStr);
+            // toString 格式类似:
+            //   动态: "...shape=[1, 4, -1, -1],dimNames=["","",height,width]..."
+            //   固定: "...shape=[1, 4, 512, 512]"
+            int shapeIdx = infoStr.indexOf("shape=[");
+            if (shapeIdx >= 0) {
+                int endIdx = infoStr.indexOf("]", shapeIdx);
+                String shapePart = infoStr.substring(shapeIdx + 7, endIdx);
+                String[] dims = shapePart.trim().split(",\\s*");
+                if (dims.length >= 4) {
+                    int h = Integer.parseInt(dims[dims.length - 2].trim());
+                    int w = Integer.parseInt(dims[dims.length - 1].trim());
+                    // 只有正数尺寸才需要 resize
+                    if (h > 0 && w > 0) {
+                        modelH = h;
+                        modelW = w;
+                        needsResize = true;
+                    } else {
+                        modelH = -1; modelW = -1; needsResize = false;
+                    }
+                } else {
+                    modelH = -1; modelW = -1; needsResize = false;
+                }
+            } else {
+                modelH = -1; modelW = -1; needsResize = false;
+            }
+        } catch (Exception e) {
+            modelH = -1;
+            modelW = -1;
+            needsResize = false;
+        }
+        System.out.println("Model size: " + (needsResize ? (modelW + "x" + modelH + " (fixed)") : "dynamic"));
     }
 
     public Mat inpaint(Mat image, Mat mask) throws OrtException {
-        // 保存原始图像和 mask（resize 会覆盖输入）
         int origH = image.rows(), origW = image.cols();
 
+        // 在 resize 前保存原图，用于后面的 blend
+        Mat origImage = image.clone();
+        Mat origMask = mask.clone();
+
+        // 固定尺寸模型需要 resize，动态模型直接 pad
+        int targetW = needsResize ? modelW : origW;
+        int targetH = needsResize ? modelH : origH;
+
+        if (needsResize) {
+            Imgproc.resize(image, image, new Size(targetW, targetH));
+            Imgproc.resize(mask, mask, new Size(targetW, targetH), 0, 0, Imgproc.INTER_NEAREST);
+        }
+
         if (isMergedInput) {
-            // 4 通道合并输入：需要 image*(1-mask) 预处理 + blend 后处理
-            Mat origImage = image.clone();
-            Mat origMask = mask.clone();
-
-            Imgproc.resize(image, image, new Size(512, 512));
-            Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
-
+            // 4 通道合并输入：image*(1-mask) 预处理 + blend 后处理
             Map<String, OnnxTensor> inputs = prepareMergedInput(image, mask, 64);
             Mat output;
             try (OrtSession.Result results = session.run(inputs)) {
                 output = convertOutputToMat((float[][][][]) results.get(0).getValue());
             }
 
-            Mat cropped = new Mat(output, new Rect(0, 0, 512, 512));
+            // 裁切掉 pad，再 resize 回原始尺寸
+            Mat cropped = new Mat(output, new Rect(0, 0, targetW, targetH));
             Mat resized = new Mat();
-            Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
+            if (needsResize) {
+                Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
+            } else {
+                resized = cropped;
+            }
 
             return blendWithOriginal(origImage, origMask, resized);
         } else {
-            // 分开输入 (big-lama)：直接传给模型，模型内部处理 mask
-            Imgproc.resize(image, image, new Size(512, 512));
-            Imgproc.resize(mask, mask, new Size(512, 512), 0, 0, Imgproc.INTER_NEAREST);
-
+            // 分开输入 (big-lama)：直接传给模型
             Map<String, OnnxTensor> inputs = prepareImgAndMask(image, mask, 64);
             Mat output;
             try (OrtSession.Result results = session.run(inputs)) {
                 output = convertOutputToMat((float[][][][]) results.get(0).getValue());
             }
 
-            Mat cropped = new Mat(output, new Rect(0, 0, 512, 512));
-            Mat resized = new Mat();
-            Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
-
-            return resized;
+            Mat cropped = new Mat(output, new Rect(0, 0, targetW, targetH));
+            if (needsResize) {
+                Mat resized = new Mat();
+                Imgproc.resize(cropped, resized, new Size(origW, origH), 0, 0, Imgproc.INTER_CUBIC);
+                return resized;
+            }
+            return cropped;
         }
     }
 
