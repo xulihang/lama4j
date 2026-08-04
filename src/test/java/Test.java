@@ -31,8 +31,8 @@ public class Test {
 
 
         // 读取图像和 mask
-        Mat image = Imgcodecs.imread("image.jpg");
-        Mat mask = Imgcodecs.imread("thresh.png", Imgcodecs.IMREAD_GRAYSCALE);
+        Mat image = Imgcodecs.imread("cropped.png");
+        Mat mask = Imgcodecs.imread("cropped.png-mask.png", Imgcodecs.IMREAD_GRAYSCALE);
 
         Mat outImg = lama.inpaint(image,mask);
         Imgcodecs.imwrite("out.jpg", outImg);
