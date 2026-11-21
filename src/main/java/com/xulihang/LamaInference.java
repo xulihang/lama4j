@@ -4,24 +4,41 @@ import ai.onnxruntime.*;
 import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
 
+import java.io.File;
 import java.nio.FloatBuffer;
 import java.util.*;
 
 public class LamaInference {
+    public static final String DEVICE_CPU = "cpu";
+    public static final String DEVICE_WEBGPU = "webgpu";
+    private static final String WEBGPU_EP = "WebGpuExecutionProvider";
+    private static final String WEBGPU_LIB_BASE = "onnxruntime_providers_webgpu";
+
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
-    private final OrtSession session;
+    private final String device;   // 实际使用的后端：cpu / webgpu
+    private OrtSession session;
     private final boolean isMergedInput; // INT8 模型把 image+mask 合并为 4 通道输入
     private boolean needsResize;   // 固定尺寸模型需要 resize
     private int modelH, modelW;    // 模型期望的输入尺寸
+    private double lastRunMs = -1; // 最近一次 session.run() 耗时（纯推理，不含前后处理）
 
+    /** CPU session。 */
     public LamaInference(String path) throws OrtException {
-        EnumSet<OrtProvider> providers = OrtEnvironment.getEnvironment().getAvailableProviders();
-        System.out.println("Available ONNX Runtime providers:");
-        for (OrtProvider provider : providers) {
-            System.out.println(" - " + provider.getName());
-        }
-        OrtSession.SessionOptions options = new OrtSession.SessionOptions();
-        session = env.createSession(path, options);
+        this(path, DEVICE_CPU, null);
+    }
+
+    /**
+     * @param path          ONNX model path
+     * @param device        {@link #DEVICE_WEBGPU} 或 {@link #DEVICE_CPU}（null 视为 CPU）；
+     *                      WebGPU 不可用时自动回退 CPU
+     * @param webgpuLibPath 存放 WebGPU provider 库的目录或库文件本身的完整路径，可为 null。
+     *                      自动按平台查找库名（onnxruntime_providers_webgpu.dll / .dylib / .so），
+     *                      目录查找顺序：webgpuLibPath → 当前工作目录 → jar 所在目录
+     */
+    public LamaInference(String path, String device, String webgpuLibPath) throws OrtException {
+        // Java 26+ 下 ORT-jar 的 native 加载会打印 System.loadLibrary 的 restricted-method 警告；
+        // --enable-native-access=ALL-UNNAMED 由宿主程序传入 JVM 参数解决
+        this.device = createSession(path, device, webgpuLibPath);
 
         // 检测模型输入格式
         Set<String> inputNames = session.getInputNames();
@@ -63,6 +80,96 @@ public class LamaInference {
         System.out.println("Model size: " + (needsResize ? (modelW + "x" + modelH + " (fixed)") : "dynamic"));
     }
 
+    /** 创建 session，返回实际使用的后端。WebGPU 失败时回退 CPU。 */
+    private String createSession(String path, String device, String webgpuLibPath) throws OrtException {
+        if (DEVICE_WEBGPU.equalsIgnoreCase(device == null ? DEVICE_CPU : device)) {
+            try {
+                // WebGPU 不可用（缺库 / 无 GPU 设备）时走到下面的 CPU 分支
+                registerWebGpu(findWebGpuLib(webgpuLibPath));
+                session = createWebGpuSession(path);
+                System.out.println("[lama4j] session created with WebGPU");
+                return DEVICE_WEBGPU;
+            } catch (Throwable t) {
+                // 回退到 CPU
+                System.out.println("[lama4j] WebGPU unavailable, falling back to CPU: " + t);
+            }
+        }
+        session = env.createSession(path, new OrtSession.SessionOptions());
+        System.out.println("[lama4j] session created with CPU");
+        return DEVICE_CPU;
+    }
+
+    private OrtSession createWebGpuSession(String path) throws OrtException {
+        List<OrtEpDevice> devices = new ArrayList<>();
+        for (OrtEpDevice d : env.getEpDevices()) {
+            if (WEBGPU_EP.equals(d.getEpName())) devices.add(d);
+        }
+        if (devices.isEmpty()) throw new IllegalStateException("no " + WEBGPU_EP + " device");
+
+        OrtSession.SessionOptions options = new OrtSession.SessionOptions();
+        // device-dependent EP：不支持的节点自动 fallback 到 CPU
+        options.addExecutionProvider(devices, new HashMap<>());
+        return env.createSession(path, options);
+    }
+
+    /** 按平台拼出 WebGPU provider 库的文件名。 */
+    private static String webGpuLibName() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        String prefix = os.contains("mac") ? "lib" : "";
+        String suffix = os.contains("win") ? ".dll" : os.contains("mac") ? ".dylib" : ".so";
+        return prefix + WEBGPU_LIB_BASE + suffix;
+    }
+
+    /**
+     * 定位 WebGPU provider 库：webgpuLibPath 可直接指向库文件，也可以是目录
+     * （再依次尝试当前工作目录、jar 所在目录）。
+     */
+    private static File findWebGpuLib(String webgpuLibPath) {
+        String name = webGpuLibName();
+        List<File> dirs = new ArrayList<>();
+        if (webgpuLibPath != null && !webgpuLibPath.isEmpty()) {
+            File f = new File(webgpuLibPath);
+            if (f.isFile()) return f;
+            dirs.add(f);
+        }
+        dirs.add(new File(System.getProperty("user.dir")));
+        dirs.add(jarDir());
+        for (File dir : dirs) {
+            File f = new File(dir, name);
+            if (f.isFile()) return f;
+        }
+        throw new IllegalStateException(name + " not found (searched: " + dirs + ")");
+    }
+
+    private static File jarDir() {
+        try {
+            File f = new File(LamaInference.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            return f.isFile() ? f.getParentFile() : f;
+        } catch (Exception e) {
+            return new File(System.getProperty("user.dir"));
+        }
+    }
+
+    /** 首次调用时注册 WebGPU 插件 EP；onnxruntime.dll 本身由宿主程序或 ORT-jar 负责加载。 */
+    private static synchronized void registerWebGpu(File dll) throws OrtException {
+        System.out.println("[lama4j] found WebGPU provider DLL: " + dll.getAbsolutePath());
+        OrtEnvironment.getEnvironment().registerExecutionProviderLibrary("webgpu", dll.getAbsolutePath());
+    }
+
+    /** 实际使用的后端："cpu" 或 "webgpu"。 */
+    public String getDevice() {
+        return device;
+    }
+
+    public boolean isWebGpu() {
+        return DEVICE_WEBGPU.equals(device);
+    }
+
+    /** 最近一次 inpaint 的纯推理耗时（毫秒），尚无记录时为 -1。 */
+    public double getLastRunMs() {
+        return lastRunMs;
+    }
+
     public void close() throws OrtException {
         session.close();
         env.close();
@@ -95,7 +202,7 @@ public class LamaInference {
                                int targetW, int targetH, int origW, int origH) throws OrtException {
         Map<String, OnnxTensor> inputs = prepareMergedInput(image, mask, 64);
         try {
-            OrtSession.Result results = session.run(inputs);
+            OrtSession.Result results = run(inputs);
             try {
                 float[][][][] output = (float[][][][]) results.get(0).getValue();
                 Mat outMat = convertOutputToMat(output);
@@ -125,7 +232,7 @@ public class LamaInference {
                                  int origW, int origH) throws OrtException {
         Map<String, OnnxTensor> inputs = prepareImgAndMask(image, mask, 64);
         try {
-            OrtSession.Result results = session.run(inputs);
+            OrtSession.Result results = run(inputs);
             try {
                 float[][][][] output = (float[][][][]) results.get(0).getValue();
                 Mat outMat = convertOutputToMat(output);
@@ -145,6 +252,13 @@ public class LamaInference {
                 t.close();
             }
         }
+    }
+
+    private OrtSession.Result run(Map<String, OnnxTensor> inputs) throws OrtException {
+        long t = System.nanoTime();
+        OrtSession.Result results = session.run(inputs);
+        lastRunMs = (System.nanoTime() - t) / 1e6;
+        return results;
     }
 
     /**
