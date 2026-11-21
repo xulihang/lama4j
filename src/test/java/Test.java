@@ -22,23 +22,24 @@ public class Test {
         System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
         System.out.println("Hello world!");
         System.out.println("Test");
-        Test();
+        Test(args.length > 0 ? args[0] : "webgpu", args.length > 1 ? args[1] : "lama_512_int8.onnx");
     }
 
-    private static void Test() throws OrtException{
-        // 加载 ONNX 模型
-        LamaInference lama = new LamaInference("lama_512_int8.onnx");
+    private static void Test(String device, String model) throws OrtException{
+        // 加载 ONNX 模型：device = "webgpu"（默认）或 "cpu"
+        LamaInference lama = new LamaInference(model, device, "src/main/resources/native");
 
 
         // 读取图像和 mask
         Mat image = Imgcodecs.imread("cropped.png");
         Mat mask = Imgcodecs.imread("cropped.png-mask.png", Imgcodecs.IMREAD_GRAYSCALE);
 
+        long t = System.nanoTime();
         Mat outImg = lama.inpaint(image,mask);
-        Imgcodecs.imwrite("out.jpg", outImg);
-        System.out.println("Saved: out.jpg");
-
-        System.out.println("Saved: out.jpg");
+        System.out.printf("device=%s  total=%.0fms  run=%.0fms%n", lama.getDevice(),
+                (System.nanoTime() - t) / 1e6, lama.getLastRunMs());
+        Imgcodecs.imwrite("out_" + lama.getDevice() + ".jpg", outImg);
+        System.out.println("Saved: out_" + lama.getDevice() + ".jpg");
     }
 
     private static void Test2() throws Exception {
